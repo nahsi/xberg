@@ -390,6 +390,10 @@ pub struct InternalDocument {
     /// be able to exempt its own images from OCR. ~keep
     #[serde(skip)]
     pub image_ocr_skip_indices: ahash::AHashSet<u32>,
+
+    /// Forced-OCR PDF pages the VLM figure read owns: native pictures there get no placeholder link. ~keep
+    #[serde(skip)]
+    pub vlm_figure_pages: ahash::AHashSet<u32>,
 }
 
 impl From<crate::types::extraction::ExtractedDocument> for InternalDocument {
@@ -484,6 +488,7 @@ impl InternalDocument {
             #[cfg(any(feature = "ocr", feature = "ocr-pipeline"))]
             ocr_text_claimed_by_tables: false,
             image_ocr_skip_indices: ahash::AHashSet::new(),
+            vlm_figure_pages: ahash::AHashSet::new(),
         }
     }
 

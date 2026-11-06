@@ -136,7 +136,8 @@ as the transcription. Captions remain ordinary text; a short model description s
 the image alt text, or `Figure` when no description is given. Crop accuracy depends on the model.
 
 The returned image inventory includes the crops and any requested native images or page
-rasters. Only crops appear as figure links on pages where the VLM marked figures.
+rasters. On every PDF page read in figure mode, only VLM crops appear as image links.
+Native images and page rasters stay inventory-only, including on pages without figures.
 Standalone source bytes remain in the inventory without an extra source-image link.
 PDF crops carry PDF-point bounding boxes; standalone crops leave that field unset.
 

@@ -18,7 +18,9 @@ pub(super) const PROMPT_CLAUSE: &str = "\n\nMark photographs, illustrations, cha
     at their position in reading order, using <figure bbox=\"x1,y1,x2,y2\" description=\"short description\"/>. \
     Give the top-left and bottom-right corners in integer coordinates from 0 to 1000 of the provided image. \
     Mark the picture only, not its caption. Transcribe captions as ordinary text. \
-    Ignore reverse-side show-through and decorative icons. Give a short description. Do not use a code fence.";
+    Ignore reverse-side show-through and decorative icons. Give a short description of what is \
+    visible, in the language of the page text; do not name a person unless the page names them. \
+    Do not use a code fence.";
 
 #[derive(Debug)]
 struct FigureMarker {

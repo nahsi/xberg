@@ -3446,6 +3446,11 @@ pub(super) async fn extract_with_ocr_for_page(
         .unwrap_or_default();
     limits.max_content_size = pipeline_xobject_content_limit(config, &ocr_config_owned);
     ocr_config_owned.security_limits = Some(limits);
+    #[cfg(feature = "liter-llm")]
+    let vlm_figures_owned = config.force_ocr
+        && detached_page.is_none()
+        && content.is_some()
+        && crate::core::config::ocr::vlm_figures_active(&ocr_config_owned, config.images.as_ref());
     let total_pages = if has_stored_scan {
         1
     } else if let Some(imgs) = images {
@@ -3505,6 +3510,7 @@ pub(super) async fn extract_with_ocr_for_page(
     )]
     let mut detached_page_scales = vec![None; total_pages];
     let mut ordered_ocr_pages = ahash::AHashMap::new();
+    let mut vlm_figure_pages = ahash::AHashSet::new();
     // Written only by the two OCR-paragraph assembly blocks below (`layout-detection`
     // *with* `ocr`/`ocr-wasm`, or `not(layout-detection)`); still read unconditionally by
     // the document-global heuristic. `layout-detection` without either OCR frontend (the
@@ -4713,6 +4719,13 @@ pub(super) async fn extract_with_ocr_for_page(
             // Report a page whose backend call failed, now that the fallback above has had
             // its chance to recover it (#1444). Either way the failure is visible: a page
             // that vanishes silently is the defect this replaces.
+            #[cfg(feature = "liter-llm")]
+            if vlm_figures_owned
+                && batch_page_errors[offset].is_none()
+                && !pages_with_recovered_xobject_payload[page_idx]
+            {
+                vlm_figure_pages.insert(document_page_number);
+            }
             if let Some(error) = batch_page_errors[offset].take() {
                 let recovered = !ocr_result.content.trim().is_empty() || pages_with_recovered_xobject_payload[page_idx];
                 if !recovered && xobject_retry_ran_empty {
@@ -5398,7 +5411,7 @@ pub(super) async fn extract_with_ocr_for_page(
             page.paragraphs.clear();
         }
     }
-    let ocr_doc = if ordered_ocr_pages.is_empty() {
+    let mut ocr_doc = if ordered_ocr_pages.is_empty() {
         ocr_doc
     } else {
         let accepted: ahash::AHashMap<u32, String> = page_texts
@@ -5418,6 +5431,10 @@ pub(super) async fn extract_with_ocr_for_page(
         );
         Some(document)
     };
+    if let Some(doc) = ocr_doc.as_mut() {
+        vlm_figure_pages.retain(|page| !rejected_pages[*page as usize - page_index_offset - 1]);
+        doc.vlm_figure_pages = vlm_figure_pages;
+    }
 
     #[cfg(all(feature = "layout-detection", any(feature = "ocr", feature = "ocr-wasm")))]
     let ocr_doc = match ocr_doc {
