@@ -548,6 +548,55 @@ pub struct OcrPipelineStage {
 #[allow(dead_code)]
 pub(crate) const SOURCE_DPI_BACKEND_OPTION: &str = "source_dpi";
 
+/// Backend option enabling figure crops on supported VLM extraction routes.
+pub(crate) const VLM_FIGURES_BACKEND_OPTION: &str = "vlm_figures";
+
+/// Host-stamped per-call figure policy; see [`stamp_vlm_figure_policy`]. ~keep
+#[cfg(feature = "liter-llm")]
+pub(crate) const VLM_FIGURE_POLICY_BACKEND_OPTION: &str = "vlm_figure_policy";
+
+fn vlm_figures_requested(options: Option<&serde_json::Value>) -> bool {
+    options
+        .and_then(|options| options.get(VLM_FIGURES_BACKEND_OPTION))
+        .and_then(serde_json::Value::as_bool)
+        .unwrap_or(false)
+}
+
+#[cfg(feature = "liter-llm")]
+#[derive(Clone, Serialize, Deserialize)]
+pub(crate) struct VlmFigurePolicy {
+    pub max_per_page: Option<u32>,
+    pub max_dimension: u32,
+    #[serde(default)]
+    pub retained_bytes: usize,
+}
+
+#[cfg(feature = "liter-llm")]
+pub(crate) fn stamp_vlm_figure_policy(
+    ocr: &mut OcrConfig,
+    images: Option<&super::ImageExtractionConfig>,
+    retained_bytes: usize,
+) {
+    if ocr.backend != "vlm"
+        || ocr.pipeline.is_some()
+        || ocr.vlm_fallback != VlmFallbackPolicy::Disabled
+        || !vlm_figures_requested(ocr.backend_options.as_ref())
+    {
+        return;
+    }
+    let Some(images) = images.filter(|images| images.extract_images) else {
+        return;
+    };
+    let policy = VlmFigurePolicy {
+        max_per_page: images.max_images_per_page,
+        max_dimension: u32::try_from(images.max_image_dimension).unwrap_or(0),
+        retained_bytes,
+    };
+    if let Some(options) = ocr.backend_options.as_mut().and_then(serde_json::Value::as_object_mut) {
+        options.insert(VLM_FIGURE_POLICY_BACKEND_OPTION.into(), serde_json::json!(policy));
+    }
+}
+
 /// [`OcrConfig::backend_options`] key carrying a page's PDF `/Rotate` value, in degrees.
 ///
 /// Stamped per page by the PDF OCR route alongside [`SOURCE_DPI_BACKEND_OPTION`] (see
@@ -1147,6 +1196,19 @@ impl OcrConfig {
         validate_ocr_backend(&self.backend)?;
         crate::core::config_validation::validate_vlm_backend_config(&self.backend, self.vlm_config.as_ref())?;
         validate_languages(&self.language)?;
+        if (vlm_figures_requested(self.backend_options.as_ref())
+            && (self.vlm_fallback != VlmFallbackPolicy::Disabled || self.pipeline.is_some()))
+            || self.pipeline.as_ref().is_some_and(|pipeline| {
+                pipeline
+                    .stages
+                    .iter()
+                    .any(|stage| vlm_figures_requested(stage.backend_options.as_ref()))
+            })
+        {
+            return Err(XbergError::validation(
+                "vlm_figures requires a single VLM backend; vlm_fallback and OCR pipelines are not supported",
+            ));
+        }
         if let VlmFallbackPolicy::OnLowQuality { quality_threshold } = &self.vlm_fallback {
             crate::core::config_validation::validate_confidence(*quality_threshold)?;
         }
@@ -2274,6 +2336,39 @@ model_tier = "server"
             ..Default::default()
         };
         assert!(config.validate().is_ok());
+    }
+
+    #[test]
+    fn vlm_figures_rejects_fallback_and_pipeline_configuration() {
+        for (fallback, pipeline, stage_flag) in [
+            (VlmFallbackPolicy::Always, false, false),
+            (VlmFallbackPolicy::OnLowQuality { quality_threshold: 0.6 }, false, false),
+            (VlmFallbackPolicy::Disabled, true, false),
+            (VlmFallbackPolicy::Disabled, true, true),
+        ] {
+            let config = OcrConfig {
+                backend: "vlm".into(),
+                vlm_config: Some(super::super::llm::LlmConfig {
+                    model: "openai/fixture".into(),
+                    ..Default::default()
+                }),
+                backend_options: (!stage_flag).then(|| serde_json::json!({"vlm_figures": true})),
+                vlm_fallback: fallback,
+                pipeline: pipeline.then(|| {
+                    serde_json::from_value(serde_json::json!({
+                        "stages": [{"backend": "vlm", "priority": 0, "vlm_config": {"model": "openai/fixture"},
+                            "backend_options": {"vlm_figures": stage_flag}}]
+                    }))
+                    .unwrap()
+                }),
+                ..Default::default()
+            };
+            let error = config
+                .validate()
+                .expect_err("figure crops require the single-backend route");
+            assert!(matches!(error, XbergError::Validation { .. }));
+            assert!(error.to_string().contains("vlm_figures"), "{error}");
+        }
     }
 
     #[test]

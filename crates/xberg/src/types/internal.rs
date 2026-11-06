@@ -383,6 +383,13 @@ pub struct InternalDocument {
     #[serde(skip)]
     #[cfg(any(feature = "ocr", feature = "ocr-pipeline"))]
     pub ocr_text_claimed_by_tables: bool,
+
+    /// Inventory indices page OCR already read as part of the page (VLM figure crops and the
+    /// standalone source image beside them), so embedded-image OCR does not send them back to
+    /// the backend. Never crosses the plugin-bridge JSON wire format: a foreign plugin must not
+    /// be able to exempt its own images from OCR. ~keep
+    #[serde(skip)]
+    pub image_ocr_skip_indices: ahash::AHashSet<u32>,
 }
 
 impl From<crate::types::extraction::ExtractedDocument> for InternalDocument {
@@ -476,6 +483,7 @@ impl InternalDocument {
             ocr_coordinate_frame: None,
             #[cfg(any(feature = "ocr", feature = "ocr-pipeline"))]
             ocr_text_claimed_by_tables: false,
+            image_ocr_skip_indices: ahash::AHashSet::new(),
         }
     }
 

@@ -13,9 +13,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **(ocr): Extract VLM figure crops in reading order.**
+  Opt in with `ocr.backend_options.vlm_figures = true` and `images.extract_images = true` on forced
+  whole-document PDF OCR or standalone JPEG/PNG with `backend = "vlm"`. Crops are positioned PNGs with
+  the model's description as alt text; `vlm_fallback` and OCR pipelines reject the option.
+
 - **(layout): Return source-proven text for selected native PDF layout regions in Rust.** (#2357)
   `Engine::extract_with_layout_region_text` returns region text in page reading order and omits unproved or redacted text.
   An explicitly declared crop box is supported when its resolved geometry exactly matches the media box.
+  A native span crossing a detector box withholds that region while exact independent regions remain available.
 
 - **(engine): Override layout-for-Markdown behavior per batch input.** (#2367)
   Explicit options take precedence after file overrides; omitted options inherit the batch configuration.
@@ -410,6 +416,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **(ocr): Recover tall scans with default PNG predictor parameters.** (#2620)
   Accept omitted values when the PDF defaults match the source image.
 
+- **(pdf): Render layout rasters within the configured memory budget.** (#2332)
+  Lower DPI within the allowed range while keeping detections in the original PDF point frame.
+
+- **(pdf): Certify painted table-cell overhangs by exact source geometry.** (#2616)
+  Keep matching values with alternate number formatting in their original cells.
+
+- **(ocr): Separate a merged table header from its first record in standalone OCR.** (#2432)
+  Require independent row geometry and preserve recognized text and later cell boundaries.
+
 - **(pdf): Preserve a figure tick beside a table using exact source ownership.** (#2616)
   A decimal comma no longer blocks recovery of the outside figure label.
 
@@ -420,6 +435,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - **(pdf): Recover rejected multirow painted double-rule grids.** (#2614)
   Preserve tables the detector already accepts, including their empty columns.
+
+- **(ocr): Remove a certified duplicate glyph from a recovered photo title.** (#2312)
+  Both text projections must identify the same standalone source occurrence.
+
+- **(pdf): Recover hidden CCITT prose across two audited content streams.** (#2425)
+  The split path requires bounded, independently complete raw paint and text streams.
+
+- **(ocr): Recover certified tall grayscale Flate strips down to 120 DPI.** (#2502)
+  Require each recovered strip to match the source ink rows.
+
+- **(ocr): Recover verified embedded PDF prose with caching enabled.** (#2327)
+  Preserve the primary cache identity and bypass the cache for the private source-DPI retry.
+
+- **(pdf): Recover full-page grayscale raster prose beside visible native stubs.** (#2313)
+  Bound the source paint audit and keep the native lines in order.
 
 - **(pdf): Recover verified outlined prose beside sparse native text.** (#2313)
   Auto OCR checks bounded vector rows and preserves the original native text.

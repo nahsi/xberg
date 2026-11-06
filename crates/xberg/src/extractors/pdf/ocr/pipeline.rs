@@ -1776,7 +1776,7 @@ async fn extract_mixed_ocr_native_with_layout_inputs(
                         continue;
                     }
                 };
-                crate::extraction::derive::adopt_public_ocr_document(
+                crate::extraction::derive::prepare_ocr_document(
                     &mut extraction_result,
                     config.security_limits.as_ref().unwrap_or(&Default::default()),
                 )?;
@@ -1931,7 +1931,7 @@ async fn extract_mixed_ocr_native_with_layout_inputs(
                         continue;
                     }
                 };
-                crate::extraction::derive::adopt_public_ocr_document(
+                crate::extraction::derive::prepare_ocr_document(
                     &mut extraction_result,
                     config.security_limits.as_ref().unwrap_or(&Default::default()),
                 )?;
@@ -3504,7 +3504,7 @@ pub(super) async fn extract_with_ocr_for_page(
         allow(unused_mut)
     )]
     let mut detached_page_scales = vec![None; total_pages];
-    let mut public_ocr_pages = ahash::AHashMap::new();
+    let mut ordered_ocr_pages = ahash::AHashMap::new();
     // Written only by the two OCR-paragraph assembly blocks below (`layout-detection`
     // *with* `ocr`/`ocr-wasm`, or `not(layout-detection)`); still read unconditionally by
     // the document-global heuristic. `layout-detection` without either OCR frontend (the
@@ -3919,6 +3919,18 @@ pub(super) async fn extract_with_ocr_for_page(
                     .and_then(|images| images.get(idx - batch_start))
                     .map_or(0, |image| image.as_bytes().len());
                 let retained_source_bytes = retained_ocr_source_bytes(image_data, &upright_data, retained_pixels);
+                #[cfg(feature = "liter-llm")]
+                let config_clone = {
+                    let mut config_clone = config_clone;
+                    if config.force_ocr && detached_page.is_none() && content.is_some() {
+                        crate::core::config::ocr::stamp_vlm_figure_policy(
+                            &mut config_clone,
+                            config.images.as_ref(),
+                            retained_source_bytes,
+                        );
+                    }
+                    config_clone
+                };
                 #[cfg(all(feature = "ocr", feature = "pdf", not(target_arch = "wasm32")))]
                 let ordered_raster = (try_tall_source
                     && super::tall_source::augmentation::supports_run(config, *height)
@@ -4249,6 +4261,23 @@ pub(super) async fn extract_with_ocr_for_page(
                 #[cfg(not(feature = "pdf"))]
                 let (upright_data, upright_width, upright_height, correction_degrees) =
                     (Arc::clone(image_data), *width, *height, 0u32);
+                #[cfg(feature = "liter-llm")]
+                let config_for_page = {
+                    let retained_pixels = batch_slice
+                        .as_ref()
+                        .and_then(|images| images.get(*page_idx - batch_start))
+                        .map_or(0, |image| image.as_bytes().len());
+                    let retained = retained_ocr_source_bytes(image_data, &upright_data, retained_pixels);
+                    let mut config_for_page = config_for_page.into_owned();
+                    if config.force_ocr && detached_page.is_none() && content.is_some() {
+                        crate::core::config::ocr::stamp_vlm_figure_policy(
+                            &mut config_for_page,
+                            config.images.as_ref(),
+                            retained,
+                        );
+                    }
+                    Cow::Owned(config_for_page)
+                };
                 // A cancelled page still needs a `batch_ocr_results` entry -- see the ~keep
                 // comment on the sibling `JoinSet` branch above -- so this skips the backend
                 // call rather than breaking the loop.
@@ -4333,7 +4362,7 @@ pub(super) async fn extract_with_ocr_for_page(
                     &ocr_result,
                 );
             }
-            crate::extraction::derive::adopt_public_ocr_document(
+            crate::extraction::derive::prepare_ocr_document(
                 &mut ocr_result,
                 config.security_limits.as_ref().unwrap_or(&Default::default()),
             )?;
@@ -4418,10 +4447,11 @@ pub(super) async fn extract_with_ocr_for_page(
                 accumulated_llm_usage.extend(usage);
             }
 
+            let ordered_contribution = crate::extraction::derive::preserves_ocr_reading_order(&ocr_result);
             if let Some(document) = ocr_result
                 .ocr_internal_document
                 .as_mut()
-                .filter(|_| ocr_result.document.is_some())
+                .filter(|_| ordered_contribution)
             {
                 let (width, height) = resolved_ocr_layout_dimensions(
                     &ocr_result.metadata,
@@ -4439,7 +4469,12 @@ pub(super) async fn extract_with_ocr_for_page(
                         ocr_margin_filter_capability_warning(),
                     );
                 }
-                let mut document = document.clone();
+                let mut document = if ocr_result.ocr_ordered_contribution {
+                    // Consumed here: left in place, the hOCR paragraph assembly below would read it as layout. ~keep
+                    ocr_result.ocr_internal_document.take().unwrap()
+                } else {
+                    document.clone()
+                };
                 use super::document::PublicOcrOutputFrame;
                 let frame = if let Some((pdf, _, _)) = lazy_pdf_render_state.as_ref() {
                     PublicOcrOutputFrame::PdfPage {
@@ -4457,9 +4492,19 @@ pub(super) async fn extract_with_ocr_for_page(
                 } else {
                     PublicOcrOutputFrame::ImagePixels
                 };
+                let pdf_points = matches!(frame, PublicOcrOutputFrame::PdfPage { .. });
                 super::document::place_public_ocr_bboxes(&mut document, frame);
+                if pdf_points {
+                    for element in &document.elements {
+                        if let crate::types::internal::ElementKind::Image { image_index } = element.kind
+                            && let Some(image) = document.images.get_mut(image_index as usize)
+                        {
+                            image.bounding_box = element.bbox;
+                        }
+                    }
+                }
                 super::document::normalize_mixed_ocr_document_page(&mut document, document_page_number);
-                public_ocr_pages.insert(document_page_number, document);
+                ordered_ocr_pages.insert(document_page_number, document);
             }
             // An upright, scale-only stock table is kept by implicit orientation selection.
             // Preserve its source dimensions for paragraphs while putting the table in the detached owner's render frame.
@@ -4582,7 +4627,11 @@ pub(super) async fn extract_with_ocr_for_page(
             // Set when the embedded-image retry ran (attempted at least one image) but the
             // backend returned successfully with empty content on every one of them (#1673).
             let mut xobject_retry_ran_empty = false;
-            let xobject_trigger = if has_stored_scan {
+            let figure_only_page = ocr_result.content.trim().is_empty()
+                && ordered_ocr_pages
+                    .get(&document_page_number)
+                    .is_some_and(crate::extraction::derive::has_referenced_ocr_images);
+            let xobject_trigger = if has_stored_scan || figure_only_page {
                 super::rendering::XObjectFallbackTrigger {
                     needs_fallback: false,
                     draw_failed: false,
@@ -5195,7 +5244,7 @@ pub(super) async fn extract_with_ocr_for_page(
         for (page_idx, paragraphs) in all_page_paragraphs.iter().enumerate() {
             let page = (page_index_offset + page_idx + 1) as u32;
             if paragraphs.as_ref().is_some_and(|paragraphs| !paragraphs.is_empty())
-                || public_ocr_pages.contains_key(&page)
+                || ordered_ocr_pages.contains_key(&page)
                 || rejected_pages[page_idx]
             {
                 continue;
@@ -5259,7 +5308,7 @@ pub(super) async fn extract_with_ocr_for_page(
             #[cfg(all(feature = "pdf", feature = "ocr", not(target_arch = "wasm32")))]
             let detached_table_document = (detached_table_pair
                 && pages.as_slice().first().is_some_and(Vec::is_empty)
-                && public_ocr_pages.is_empty()
+                && ordered_ocr_pages.is_empty()
                 && pages_with_recovered_xobject_payload == [false])
             .then(|| detached_table_pair::assemble(&collected_tables))
             .flatten();
@@ -5341,16 +5390,15 @@ pub(super) async fn extract_with_ocr_for_page(
         }
     };
 
-    // Public nodes are already semantic structure. Do not offer flattened copies
-    // to the mixed route's document-global paragraph reconstruction pass.
-    for page in public_ocr_pages.keys() {
+    // Ordered contributions already carry semantic structure; paragraph reconstruction would lose it.
+    for page in ordered_ocr_pages.keys() {
         if let Some(index) = (*page as usize).checked_sub(page_index_offset + 1)
             && let Some(page) = raw_page_paragraphs.get_mut(index)
         {
             page.paragraphs.clear();
         }
     }
-    let ocr_doc = if public_ocr_pages.is_empty() {
+    let ocr_doc = if ordered_ocr_pages.is_empty() {
         ocr_doc
     } else {
         let accepted: ahash::AHashMap<u32, String> = page_texts
@@ -5359,11 +5407,15 @@ pub(super) async fn extract_with_ocr_for_page(
             .filter(|(index, _)| !rejected_pages[*index])
             .filter_map(|(index, text)| {
                 let page = (page_index_offset + index + 1) as u32;
-                public_ocr_pages.contains_key(&page).then(|| (page, text.clone()))
+                ordered_ocr_pages.contains_key(&page).then(|| (page, text.clone()))
             })
             .collect();
         let mut document = ocr_doc.unwrap_or_else(|| crate::types::internal::InternalDocument::new("pdf"));
-        super::document::merge_structured_ocr_pages_into_internal_document(&mut document, &accepted, &public_ocr_pages);
+        super::document::merge_structured_ocr_pages_into_internal_document(
+            &mut document,
+            &accepted,
+            &ordered_ocr_pages,
+        );
         Some(document)
     };
 
@@ -5422,7 +5474,7 @@ pub(super) async fn extract_with_ocr_for_page(
         && get_ocr_backend_registry().read().is_builtin_tesseract(&backend)
         && !tall_source_used
         && pages_with_recovered_xobject_payload == [false]
-        && public_ocr_pages.is_empty()
+        && ordered_ocr_pages.is_empty()
         && collected_tables.is_empty()
         && accumulated_formulas.is_empty()
         && accumulated_llm_usage.is_empty()
@@ -7713,7 +7765,10 @@ pub(super) fn upright_raster_for_backend(
     )?;
     Ok((std::sync::Arc::new(rotated), new_width, new_height, correction_degrees))
 }
-#[cfg(all(any(feature = "ocr", feature = "ocr-pipeline"), not(target_arch = "wasm32")))]
+#[cfg(all(
+    any(feature = "ocr", feature = "ocr-pipeline"),
+    any(not(target_arch = "wasm32"), feature = "liter-llm")
+))]
 fn retained_ocr_source_bytes(
     original: &std::sync::Arc<Vec<u8>>,
     upright: &std::sync::Arc<Vec<u8>>,

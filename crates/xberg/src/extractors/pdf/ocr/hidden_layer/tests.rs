@@ -1,5 +1,6 @@
 use super::{
-    ImageEncoding, ImageSource, StreamFilters, adds_text_preserving_native, decode_probe_stream, hidden_text_image_name,
+    ImageEncoding, ImageSource, StreamFilters, adds_text_preserving_native, decode_probe_stream,
+    source_audit::hidden_text_image_name,
 };
 use xberg_native_pdf::content::parser::visit_complete_content_stream;
 
@@ -94,6 +95,77 @@ fn complete_source_audit_rejects_truncated_and_over_limit_operator_streams() {
     assert!(hidden_text_image_name(&malformed, |font| font == "F").is_none());
     assert!(visit_complete_content_stream(b"q Q", 1, |_| true).is_err());
     assert!(visit_complete_content_stream(b"q Q % whitespace and a comment", 2, |_| true).expect("complete stream"));
+}
+
+#[test]
+fn split_source_audit_requires_independently_complete_paint_and_hidden_text() {
+    use super::{
+        Object,
+        source_audit::{audit_hidden_text_image, audit_split_contents},
+    };
+
+    let doc = super::PdfDocument::from_bytes(CCITT_PROBE_PDF.to_vec()).unwrap();
+    let audit = |first: &[u8], second: &[u8], byte_limit, mut work| {
+        let streams = [first, second].map(|bytes| Object::Stream {
+            dict: Default::default(),
+            data: bytes::Bytes::copy_from_slice(bytes),
+        });
+        let joined = audit_split_contents(&doc, &streams, byte_limit, &mut work)?;
+        audit_hidden_text_image(&joined, true, |font| font == "F")
+    };
+    let paint = b"q 612 0 0 792 0 0 cm /Scan Do Q";
+    let hidden = b"BT /F 12 Tf 3 Tr\n1 0 0 1 20 20 Tm (layer) Tj\nET";
+    let work = paint.len() + hidden.len() + 14;
+    assert_eq!(audit(paint, hidden, 1024, work).as_deref(), Some("Scan"));
+    assert_eq!(audit(paint, hidden, 1024, work - 1), None, "both parser passes");
+    assert_eq!(
+        audit(paint, hidden, 1024, paint.len() + hidden.len() - 1),
+        None,
+        "raw bytes are debited before copying"
+    );
+    assert_eq!(audit(paint, hidden, 128, work), None, "cumulative bytes");
+    for bad_paint in [
+        b"q 612 0 0 792 0 0 cm /Scan".as_slice(),
+        b"q 612 0 0 792 0 0 cm /Scan Do",
+        b"99 q 612 0 0 792 0 0 cm /Scan Do Q",
+        b"q 612 0 0 792 cm /Scan Do Q",
+        b"q 612 0 0 792 0 0 cm /Scan Do 1 Q",
+    ] {
+        assert_eq!(audit(bad_paint, hidden, 1024, 4096), None);
+    }
+    for bad_text in [
+        b"Do Q BT /F 12 Tf 3 Tr\n1 0 0 1 20 20 Tm (layer) Tj\nET".as_slice(),
+        b"BT /F 12 Tf 3 Tr\n1 0 0 1 20 20 Tm (layer) Tj",
+        b"BT /F 12 Tf 3 Tr\n1 0 0 1 20 20 Tm (layer) Tj\nET /Cover Do",
+        b"BT /F 12 Tf 0 Tr\n1 0 0 1 20 20 Tm (layer) Tj\nET",
+        b"BT /F 12 Tf 259 Tr\n1 0 0 1 20 20 Tm (layer) Tj\nET",
+        b"BT /F 12 Tf 3 0 Tr\n1 0 0 1 20 20 Tm (layer) Tj\nET",
+    ] {
+        assert_eq!(audit(paint, bad_text, 1024, 4096), None);
+    }
+}
+
+#[test]
+fn split_source_audit_rejects_compressed_content() {
+    use super::{Object, source_audit::audit_split_contents};
+    use std::io::Write;
+
+    let doc = super::PdfDocument::from_bytes(CCITT_PROBE_PDF.to_vec()).unwrap();
+    let paint = b"q 612 0 0 792 0 0 cm /Scan Do Q";
+    let hidden = b"BT /F 12 Tf 3 Tr\n1 0 0 1 20 20 Tm (layer) Tj\nET";
+    let mut encoder = flate2::write::ZlibEncoder::new(Vec::new(), flate2::Compression::fast());
+    encoder.write_all(hidden).unwrap();
+    let streams = [
+        Object::Stream {
+            dict: Default::default(),
+            data: bytes::Bytes::copy_from_slice(paint),
+        },
+        Object::Stream {
+            dict: std::collections::HashMap::from([("Filter".to_owned(), Object::Name("FlateDecode".into()))]),
+            data: encoder.finish().unwrap().into(),
+        },
+    ];
+    assert!(audit_split_contents(&doc, &streams, 1024, &mut 4096).is_none());
 }
 
 #[test]

@@ -94,7 +94,7 @@ pub async fn extract_region_with_vlm_usage(
 ) -> crate::Result<(String, Option<LlmUsage>)> {
     let prompt = custom_prompt.unwrap_or_else(|| region_kind.default_prompt());
 
-    vlm_ocr(image_bytes, image_mime, "eng", llm_config, Some(prompt)).await
+    vlm_ocr(image_bytes, image_mime, "eng", llm_config, Some(prompt), false).await
 }
 
 #[cfg(test)]

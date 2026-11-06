@@ -3924,18 +3924,32 @@ impl PdfExtractor {
         attach_unrepresented_tables(&mut doc, tables);
         inject_unrepresented_table_elements(&mut doc, allow_table_injection);
 
+        let retained_image_count = doc.images.len() as u32;
+        // Pages whose ordered OCR contribution already placed its pictures (VLM figure
+        // crops, indices below `retained_image_count`): native pictures there stay
+        // inventory-only so the flow carries one link per picture. Elsewhere the old
+        // rule stands: a document that already has image elements gets no placeholders. ~keep
+        let figure_pages: ahash::AHashSet<Option<u32>> = doc
+            .elements
+            .iter()
+            .filter(|element| matches!(element.kind, ElementKind::Image { image_index } if image_index < retained_image_count))
+            .map(|element| element.page)
+            .collect();
+        let document_has_image_elements = doc.elements.iter().any(|element| {
+            #[cfg(all(feature = "ocr", feature = "tokio-runtime"))]
+            if element.image_ocr_text_anchor_index().is_some() {
+                return true;
+            }
+            matches!(element.kind, ElementKind::Image { image_index } if image_index >= retained_image_count)
+        });
         if let Some(imgs) = images {
-            // The OCR path has its own guarded injection block below (see the `#[cfg(feature = "ocr")]`
             let image_anchor = extraction::image_anchor(config);
-            let document_has_image_elements = doc.elements.iter().any(|element| {
-                #[cfg(all(feature = "ocr", feature = "tokio-runtime"))]
-                if element.image_ocr_text_anchor_index().is_some() {
-                    return true;
-                }
-                matches!(element.kind, ElementKind::Image { .. })
-            });
             if !document_has_image_elements && image_anchor != extraction::ImageAnchor::None {
-                for (idx, img) in imgs.iter().enumerate() {
+                for (offset, img) in imgs.iter().enumerate() {
+                    if figure_pages.contains(&img.page_number) {
+                        continue;
+                    }
+                    let idx = retained_image_count + offset as u32;
                     // Page OCR already read the picture as part of the page, so the picture's
                     // own OCR text is not rendered there: no anchor, and a placeholder without
                     // the text. The OCR merge of a structured document does the same for the
@@ -3950,17 +3964,11 @@ impl PdfExtractor {
                     #[cfg(all(feature = "ocr", feature = "tokio-runtime"))]
                     if image_anchor == extraction::ImageAnchor::OcrTextOnly {
                         if !page_text_is_from_ocr {
-                            doc.push_element(InternalElement::image_ocr_text_anchor(idx as u32, img.page_number));
+                            doc.push_element(InternalElement::image_ocr_text_anchor(idx, img.page_number));
                         }
                         continue;
                     }
-                    let mut elem = InternalElement::text(
-                        ElementKind::Image {
-                            image_index: idx as u32,
-                        },
-                        "",
-                        0,
-                    );
+                    let mut elem = InternalElement::text(ElementKind::Image { image_index: idx }, "", 0);
                     elem.page = img.page_number;
                     #[cfg(all(feature = "ocr", feature = "tokio-runtime"))]
                     if page_text_is_from_ocr {
@@ -3969,7 +3977,10 @@ impl PdfExtractor {
                     doc.push_element(elem);
                 }
             }
-            doc.images = imgs;
+            for (offset, mut image) in imgs.into_iter().enumerate() {
+                image.image_index = retained_image_count + offset as u32;
+                doc.images.push(image);
+            }
         }
 
         #[cfg(any(feature = "ocr", feature = "ocr-pipeline"))]
@@ -4003,7 +4014,7 @@ impl PdfExtractor {
             let images_enabled = config.images.as_ref().map(|c| c.extract_images).unwrap_or(false)
                 || config.pdf_options.as_ref().map(|p| p.extract_images).unwrap_or(false);
             if images_enabled && config.images.as_ref().map(|c| c.inject_placeholders).unwrap_or(false) {
-                let referenced_images: std::collections::HashSet<u32> = doc
+                let referenced_images: ahash::AHashSet<u32> = doc
                     .elements
                     .iter()
                     .filter_map(|element| match element.kind {
@@ -4014,7 +4025,9 @@ impl PdfExtractor {
                 let elems: Vec<InternalElement> = doc
                     .images
                     .iter()
-                    .filter(|image| !referenced_images.contains(&image.image_index))
+                    .filter(|image| {
+                        !referenced_images.contains(&image.image_index) && !figure_pages.contains(&image.page_number)
+                    })
                     .map(|img| {
                         let elem = InternalElement::text(
                             ElementKind::Image {
@@ -4034,6 +4047,12 @@ impl PdfExtractor {
                     doc.push_element(elem);
                 }
             }
+        }
+        if retained_image_count > 0 && config.images.as_ref().is_some_and(|images| !images.inject_placeholders) {
+            doc.elements.retain(|element| {
+                !matches!(element.kind,
+                ElementKind::Image { image_index } if image_index < retained_image_count)
+            });
         }
 
         if let Some(warning) = image_fallback_warning {

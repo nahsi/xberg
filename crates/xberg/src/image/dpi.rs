@@ -1,9 +1,9 @@
 /// PDF points per inch constant
 const PDF_POINTS_PER_INCH: f64 = 72.0;
 
-#[cfg(feature = "pdf")]
+#[cfg(any(feature = "pdf", all(feature = "liter-llm", not(target_arch = "wasm32"))))]
 pub(crate) const OCR_PNG_ENCODE_BYTES_PER_PIXEL: u64 = 4;
-#[cfg(feature = "pdf")]
+#[cfg(any(feature = "pdf", all(feature = "liter-llm", not(target_arch = "wasm32"))))]
 pub(crate) const OCR_PNG_ENCODE_FIXED_BYTES: u64 = 256 * 1024;
 #[cfg(feature = "pdf")]
 const OCR_RENDER_SOURCE_BYTES_PER_PIXEL: u64 = 4;

@@ -625,7 +625,9 @@ fn isolated_painted_orphan(
     candidates: &ahash::AHashSet<&SegmentKey>,
     hyphens: &super::pipeline::HyphenWitnesses,
 ) -> Option<usize> {
-    if candidates.len() != 1 || page.iter().any(|p| p.is_list_item || p.layout_region_path.is_some()) {
+    let mut digits = candidates.iter().copied().filter(|key| key.is_ascii_digit());
+    let candidate = digits.next()?;
+    if digits.next().is_some() || page.iter().any(|p| p.is_list_item || p.layout_region_path.is_some()) {
         return None;
     }
     page.iter().position(|paragraph| {
@@ -636,8 +638,7 @@ fn isolated_painted_orphan(
             return false;
         };
         if !plain_source_paragraph(paragraph)
-            || !is_digit(glyph)
-            || !candidates.contains(&SegmentKey::from(glyph))
+            || &SegmentKey::from(glyph) != candidate
             || paragraph.block_bbox != Some((glyph.x, glyph.y, glyph.x + glyph.width, glyph.y + glyph.height))
         {
             return false;
@@ -645,10 +646,6 @@ fn isolated_painted_orphan(
         let (text, annotations) = extract_text_and_annotations(paragraph, hyphens);
         text == glyph.text && annotations.is_empty()
     })
-}
-
-fn is_digit(glyph: &crate::pdf::hierarchy::SegmentData) -> bool {
-    matches!(glyph.text.as_bytes(), [digit] if digit.is_ascii_digit())
 }
 
 fn recover_mixed_table_tick(
@@ -2307,6 +2304,27 @@ mod tests {
             let seen = ahash::AHashMap::from_iter(seen);
             assert!(single_residual_members(&seen, &runs).is_empty());
         }
+    }
+
+    #[test]
+    fn painted_orphan_ignores_non_digits_without_resolving_two_digit_candidates() {
+        let paragraph = |text: &str, x| {
+            let mut paragraph = make_paragraph_at(text, None, 390.0);
+            let glyph = &mut paragraph.lines[0].segments[0];
+            glyph.x = x;
+            glyph.y = 390.0;
+            glyph.width = 5.0;
+            paragraph.block_bbox = Some((x, 390.0, x + 5.0, 402.0));
+            paragraph
+        };
+        let page = [paragraph("%", 13.0), paragraph("0", 33.0), paragraph("1", 53.0)];
+        let [punctuation, first, second] = page.each_ref().map(|p| SegmentKey::from(&p.lines[0].segments[0]));
+        let hyphens = Default::default();
+        let mut candidates = ahash::AHashSet::from_iter([&punctuation, &first]);
+        assert_eq!(isolated_painted_orphan(&page, &candidates, &hyphens), Some(1));
+
+        candidates.insert(&second);
+        assert_eq!(isolated_painted_orphan(&page, &candidates, &hyphens), None);
     }
 
     fn make_paragraph_in_box(text: &str, baseline_y: f32, left: f32, right: f32) -> PdfParagraph {

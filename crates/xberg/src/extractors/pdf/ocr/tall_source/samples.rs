@@ -1,7 +1,7 @@
 //! Exact, budgeted decoding of grayscale-equivalent source samples.
 
 use super::super::hidden_layer::image_predictor;
-use super::{MAX_SOURCE_PIXELS, MAX_STRIPS, MAX_TILE_SIDE};
+use super::{MAX_SOURCE_PIXELS, MAX_STRIPS, MAX_TILE_SIDE, MIN_STANDARD_SOURCE_DPI};
 use xberg_native_pdf::decoders::{DecodeParams, decode_predictor};
 use xberg_native_pdf::geometry::Rect;
 use xberg_native_pdf::object::Object;
@@ -159,10 +159,22 @@ pub(super) fn source_frame(
     }
     let dpi = 72.0 * f64::from(width) / f64::from(frame.width);
     let dpi_y = 72.0 * f64::from(height) / f64::from(frame.height);
-    if !(150.0..=300.0).contains(&dpi) || (dpi - dpi_y).abs() > 0.01 {
+    if !dpi.is_finite() || !dpi_y.is_finite() || (dpi - dpi_y).abs() > 0.01 {
         return None;
     }
     Some((width, height, dpi))
+}
+
+pub(super) fn source_density_allowed(dpi: f64, packing: Option<GrayPacking>) -> bool {
+    const MIN_CERTIFIED_GRAY_SOURCE_DPI: f64 = 120.0;
+    const MAX_SOURCE_DPI: f64 = 300.0;
+
+    let minimum = if matches!(packing, Some(GrayPacking::Byte | GrayPacking::PngPredictor(_))) {
+        MIN_CERTIFIED_GRAY_SOURCE_DPI
+    } else {
+        MIN_STANDARD_SOURCE_DPI
+    };
+    (minimum..=MAX_SOURCE_DPI).contains(&dpi)
 }
 
 #[cfg(test)]
@@ -176,6 +188,37 @@ mod tests {
         let mut encoder = ZlibEncoder::new(Vec::new(), Compression::default());
         encoder.write_all(bytes).unwrap();
         encoder.finish().unwrap()
+    }
+
+    #[test]
+    fn lower_source_density_is_limited_to_byte_and_predicted_grayscale() {
+        let cases = [
+            (None, false),
+            (Some(GrayPacking::Byte), true),
+            (Some(GrayPacking::Bilevel), false),
+            (Some(GrayPacking::NeutralRgb), false),
+            (Some(GrayPacking::Indexed([0, 255])), false),
+            (Some(GrayPacking::PngPredictor(12)), true),
+        ];
+        for (packing, supports_lower_density) in cases {
+            assert_eq!(source_density_allowed(120.0, packing), supports_lower_density);
+            assert!(!source_density_allowed(119.99, packing));
+            assert!(source_density_allowed(150.0, packing));
+            assert!(source_density_allowed(300.0, packing));
+            assert!(!source_density_allowed(300.01, packing));
+        }
+    }
+
+    #[test]
+    fn byte_packing_requires_space_for_the_compressed_and_expanded_samples() {
+        let samples = [0, 1, 254, 255];
+        let input = flate(&samples);
+        let retained = input.len() + samples.len() + 1;
+        assert_eq!(
+            decode_source_gray(&input, 2, 2, GrayPacking::Byte, retained),
+            Some((samples.to_vec(), retained))
+        );
+        assert_eq!(decode_source_gray(&input, 2, 2, GrayPacking::Byte, retained - 1), None);
     }
 
     #[test]
