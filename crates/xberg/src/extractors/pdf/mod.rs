@@ -3925,16 +3925,9 @@ impl PdfExtractor {
         inject_unrepresented_table_elements(&mut doc, allow_table_injection);
 
         let retained_image_count = doc.images.len() as u32;
-        // Pages whose ordered OCR contribution already placed its pictures (VLM figure
-        // crops, indices below `retained_image_count`): native pictures there stay
-        // inventory-only so the flow carries one link per picture. Elsewhere the old
-        // rule stands: a document that already has image elements gets no placeholders. ~keep
-        let figure_pages: ahash::AHashSet<Option<u32>> = doc
-            .elements
-            .iter()
-            .filter(|element| matches!(element.kind, ElementKind::Image { image_index } if image_index < retained_image_count))
-            .map(|element| element.page)
-            .collect();
+        // The ordered VLM read owns image placement even when it found no figures.
+        // Other pages keep the existing native-placeholder policy. ~keep
+        let figure_pages = std::mem::take(&mut doc.vlm_figure_pages);
         let document_has_image_elements = doc.elements.iter().any(|element| {
             #[cfg(all(feature = "ocr", feature = "tokio-runtime"))]
             if element.image_ocr_text_anchor_index().is_some() {
@@ -3946,7 +3939,7 @@ impl PdfExtractor {
             let image_anchor = extraction::image_anchor(config);
             if !document_has_image_elements && image_anchor != extraction::ImageAnchor::None {
                 for (offset, img) in imgs.iter().enumerate() {
-                    if figure_pages.contains(&img.page_number) {
+                    if img.page_number.is_some_and(|page| figure_pages.contains(&page)) {
                         continue;
                     }
                     let idx = retained_image_count + offset as u32;
@@ -4026,7 +4019,8 @@ impl PdfExtractor {
                     .images
                     .iter()
                     .filter(|image| {
-                        !referenced_images.contains(&image.image_index) && !figure_pages.contains(&image.page_number)
+                        !referenced_images.contains(&image.image_index)
+                            && !image.page_number.is_some_and(|page| figure_pages.contains(&page))
                     })
                     .map(|img| {
                         let elem = InternalElement::text(

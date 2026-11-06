@@ -84,6 +84,10 @@ async fn stamped_policy_materializes_exact_crops_and_appends_to_custom_prompt() 
     assert!(prompt.starts_with("Transcribe eng exactly."));
     assert!(prompt.contains("<figure bbox="));
     assert!(prompt.contains("reverse-side show-through"));
+    assert!(prompt.contains(concat!(
+        "Give a short description of what is visible, in the language of the page text; ",
+        "do not name a person unless the page names them.",
+    )));
     let payload = parts[1]["image_url"]["url"]
         .as_str()
         .unwrap()

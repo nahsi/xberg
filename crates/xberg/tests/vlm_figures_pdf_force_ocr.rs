@@ -52,24 +52,41 @@ fn request_image(request: &Request) -> image::RgbImage {
     image::load_from_memory(&bytes).unwrap().to_rgb8()
 }
 
-async fn extract_case(rotation: i64, figure_only: bool) -> (xberg::types::ExtractedDocument, image::RgbImage) {
+async fn extract_case(
+    rotation: i64,
+    figure_only: bool,
+    figures: bool,
+) -> (xberg::types::ExtractedDocument, image::RgbImage) {
+    extract_transcript_case(rotation, figure_only, figures, None).await
+}
+
+async fn extract_transcript_case(
+    rotation: i64,
+    figure_only: bool,
+    figures: bool,
+    transcript: Option<&'static str>,
+) -> (xberg::types::ExtractedDocument, image::RgbImage) {
     let server = MockServer::start().await;
-    let expected_calls = if cfg!(feature = "ocr") && figure_only { 3 } else { 2 };
+    let expected_calls = if cfg!(feature = "ocr") && figure_only && figures {
+        3
+    } else {
+        2
+    };
     Mock::given(method("POST"))
         .and(path("/chat/completions"))
         .respond_with(move |request: &Request| {
             let image = request_image(request);
             let first = (f64::from(image.width()) / f64::from(image.height()) - 0.5).abs() < 0.01;
-            let transcript = if first {
-                "The first page contains ordinary transcribed text."
-            } else if figure_only {
-                "<figure bbox=\"100,200,600,800\" description=\"Photo\"/>"
-            } else {
-                concat!(
+            let transcript = match transcript {
+                Some(text) => text,
+                None if first => "The first page contains ordinary transcribed text.",
+                None if !figures => "The second page contains ordinary transcribed text.",
+                None if figure_only => "<figure bbox=\"100,200,600,800\" description=\"Photo\"/>",
+                None => concat!(
                     "Before the photograph.\n",
                     "<figure bbox=\"100,200,600,800\" description=\"Photo\"/>\n",
                     "Caption after the photograph.",
-                )
+                ),
             };
             ResponseTemplate::new(200).set_body_json(json!({
                 "id": "pdf-figures",
@@ -99,7 +116,7 @@ async fn extract_case(rotation: i64, figure_only: bool) -> (xberg::types::Extrac
         }),
         ocr: Some(OcrConfig {
             backend: "vlm".into(),
-            backend_options: Some(json!({"vlm_figures": true})),
+            backend_options: Some(json!({"vlm_figures": figures})),
             vlm_config: Some(LlmConfig {
                 model: "openai/figure-test".into(),
                 api_key: Some("test-key".into()),
@@ -175,8 +192,8 @@ fn assert_figure(result: &xberg::types::ExtractedDocument, sent: &image::RgbImag
     );
     assert!(refs.contains(&(Some(2), crop.image_index)));
     assert!(
-        refs.iter().any(|(page, _)| *page == Some(1)),
-        "native placeholder remains on the other page"
+        refs.iter().all(|(page, _)| *page != Some(1)),
+        "a VLM-read page without figures has no native or page-raster link"
     );
     assert_eq!(
         images
@@ -196,7 +213,7 @@ fn assert_figure(result: &xberg::types::ExtractedDocument, sent: &image::RgbImag
 
 #[tokio::test]
 async fn forced_pdf_keeps_order_assets_and_per_page_placeholders() {
-    let (result, sent) = extract_case(0, false).await;
+    let (result, sent) = extract_case(0, false, true).await;
     assert_figure(&result, &sent, 0);
     assert!(result.content.find("Before the photograph").unwrap() < result.content.find("![Photo]").unwrap());
     assert!(result.content.find("![Photo]").unwrap() < result.content.find("Caption after").unwrap());
@@ -204,7 +221,7 @@ async fn forced_pdf_keeps_order_assets_and_per_page_placeholders() {
 
 #[tokio::test]
 async fn forced_pdf_retains_a_figure_only_page() {
-    let (result, sent) = extract_case(0, true).await;
+    let (result, sent) = extract_case(0, true, true).await;
     assert_figure(&result, &sent, 0);
     #[cfg(feature = "ocr")]
     assert!(
@@ -220,6 +237,47 @@ async fn forced_pdf_retains_a_figure_only_page() {
 
 #[tokio::test]
 async fn rotated_forced_pdf_keeps_upright_pixels_and_pdf_points() {
-    let (result, sent) = extract_case(90, false).await;
+    let (result, sent) = extract_case(90, false, true).await;
     assert_figure(&result, &sent, 90);
+}
+
+#[tokio::test]
+async fn forced_pdf_without_figures_keeps_native_links() {
+    let (result, _) = extract_case(0, false, false).await;
+    let images = result.images.as_ref().unwrap();
+    let refs: Vec<_> = result
+        .document
+        .as_ref()
+        .unwrap()
+        .nodes
+        .iter()
+        .filter_map(|node| {
+            if let NodeContent::Image {
+                image_index: Some(index),
+                ..
+            } = node.content
+            {
+                Some(index)
+            } else {
+                None
+            }
+        })
+        .collect();
+    assert_eq!(images.len(), 4, "two native scans and two page rasters");
+    for image in images {
+        assert!(
+            refs.contains(&image.image_index),
+            "figure mode off keeps image {} linked",
+            image.image_index
+        );
+    }
+}
+
+#[tokio::test]
+async fn marker_free_figure_mode_keeps_crlf_list_markdown() {
+    const TRANSCRIPT: &str = "A list of supplies:\r\n\r\n- First item\r\n- Second item\r\n\r\nA final paragraph.";
+    let (plain, _) = extract_transcript_case(0, false, false, Some(TRANSCRIPT)).await;
+    let (figures, _) = extract_transcript_case(0, false, true, Some(TRANSCRIPT)).await;
+    let plain_text = plain.content.split("![").next().unwrap().trim();
+    assert_eq!(figures.content.trim(), plain_text);
 }

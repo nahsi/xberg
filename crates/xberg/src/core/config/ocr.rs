@@ -572,19 +572,21 @@ pub(crate) struct VlmFigurePolicy {
 }
 
 #[cfg(feature = "liter-llm")]
+pub(crate) fn vlm_figures_active(ocr: &OcrConfig, images: Option<&super::ImageExtractionConfig>) -> bool {
+    ocr.backend == "vlm"
+        && ocr.pipeline.is_none()
+        && ocr.vlm_fallback == VlmFallbackPolicy::Disabled
+        && vlm_figures_requested(ocr.backend_options.as_ref())
+        && images.is_some_and(|images| images.extract_images)
+}
+
+#[cfg(feature = "liter-llm")]
 pub(crate) fn stamp_vlm_figure_policy(
     ocr: &mut OcrConfig,
     images: Option<&super::ImageExtractionConfig>,
     retained_bytes: usize,
 ) {
-    if ocr.backend != "vlm"
-        || ocr.pipeline.is_some()
-        || ocr.vlm_fallback != VlmFallbackPolicy::Disabled
-        || !vlm_figures_requested(ocr.backend_options.as_ref())
-    {
-        return;
-    }
-    let Some(images) = images.filter(|images| images.extract_images) else {
+    let Some(images) = images.filter(|_| vlm_figures_active(ocr, images)) else {
         return;
     };
     let policy = VlmFigurePolicy {
