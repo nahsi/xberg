@@ -3165,6 +3165,20 @@ impl ImageExtractor {
         #[cfg(not(feature = "ocr-pipeline"))]
         let ocr_input: &[u8] = content;
 
+        #[cfg(feature = "liter-llm")]
+        if matches!(mime_type, "image/jpeg" | "image/png") {
+            let retained = content.len().saturating_add(
+                normalized_ocr_bytes
+                    .as_ref()
+                    .map_or(0, |normalized| normalized.bytes.capacity()),
+            );
+            crate::core::config::ocr::stamp_vlm_figure_policy(
+                &mut ocr_config_with_format,
+                config.images.as_ref(),
+                retained,
+            );
+        }
+
         #[cfg(not(target_arch = "wasm32"))]
         let ocr_bytes = std::sync::Arc::new(ocr_input.to_vec());
         #[cfg(all(feature = "ocr", not(target_arch = "wasm32")))]
@@ -3200,7 +3214,7 @@ impl ImageExtractor {
         let ocr_result = backend.process_image(ocr_input, &ocr_config_with_format).await?;
         let ocr_result = {
             let mut result = ocr_result;
-            crate::extraction::derive::adopt_public_ocr_document(
+            crate::extraction::derive::prepare_ocr_document(
                 &mut result,
                 config.security_limits.as_ref().unwrap_or(&Default::default()),
             )?;
@@ -3224,7 +3238,7 @@ impl ImageExtractor {
         ))
         .await?;
         #[cfg(feature = "ocr")]
-        let has_public_ocr_structure = ocr_result.document.is_some();
+        let has_ordered_ocr_structure = crate::extraction::derive::preserves_ocr_reading_order(&ocr_result);
         // Only the GH#1789 numeric repair below mutates this, and that is gated on
         // `ocr` + `pdf`; an unconditional `mut` is a dead `mut` on every narrower leg,
         // which the formula-recognition+pdf clippy gate rejects. Same shape as
@@ -3242,15 +3256,14 @@ impl ImageExtractor {
         // detection) used to be dropped here entirely: nothing on the
         // standalone-image path ever read it, so a table found in a bare
         // image never reached the output.
-        // Only the GH#1789 repair below mutates these two, and it is gated on `ocr` + `pdf`,
-        // so binding them `mut` under `ocr` alone is a dead `mut` on the ocr-without-pdf leg. ~keep
+        // Numeric repair (ocr + pdf) mutates the tables; the ordered-contribution branch (ocr) takes the internal document. ~keep
         #[cfg(all(feature = "ocr", feature = "pdf"))]
         let mut ocr_tables = ocr_result.tables;
-        #[cfg(all(feature = "ocr", feature = "pdf"))]
+        #[cfg(feature = "ocr")]
         let mut ocr_internal_document = ocr_result.ocr_internal_document;
         #[cfg(all(feature = "ocr", not(feature = "pdf")))]
         let ocr_tables = ocr_result.tables;
-        #[cfg(not(all(feature = "ocr", feature = "pdf")))]
+        #[cfg(not(feature = "ocr"))]
         let ocr_internal_document = ocr_result.ocr_internal_document;
 
         // GH#1789: opt-in, same gate and rationale as the PDF mixed-OCR route
@@ -3315,14 +3328,15 @@ impl ImageExtractor {
             let use_hocr_headings = ocr_extraction_result.page_contents.is_none();
             let hocr_has_content_or_tables =
                 |internal_doc: &InternalDocument| !internal_doc.elements.is_empty() || !ocr_tables.is_empty();
-            let mut doc = match &ocr_internal_document {
-                Some(internal_doc) if has_public_ocr_structure => {
-                    build_image_ocr_document(Some(internal_doc.clone()), &ocr_extraction_result.content)
+            let mut doc = if has_ordered_ocr_structure {
+                build_image_ocr_document(ocr_internal_document.take(), &ocr_extraction_result.content)
+            } else {
+                match &ocr_internal_document {
+                    Some(internal_doc) if use_hocr_headings && hocr_has_content_or_tables(internal_doc) => {
+                        build_image_internal_document_from_hocr_elements(&internal_doc.elements)
+                    }
+                    _ => build_image_internal_document(Some(&ocr_extraction_result.content), None),
                 }
-                Some(internal_doc) if use_hocr_headings && hocr_has_content_or_tables(internal_doc) => {
-                    build_image_internal_document_from_hocr_elements(&internal_doc.elements)
-                }
-                _ => build_image_internal_document(Some(&ocr_extraction_result.content), None),
             };
             doc.metadata = ocr_metadata;
             doc.formulas = ocr_formulas;
@@ -3355,7 +3369,7 @@ impl ImageExtractor {
                 #[cfg(not(target_arch = "wasm32"))]
                 let table_text = ocr_internal_document
                     .as_ref()
-                    .filter(|_| standalone_tesseract.is_some() && !has_public_ocr_structure)
+                    .filter(|_| standalone_tesseract.is_some() && !has_ordered_ocr_structure)
                     .and_then(|source| sparse_table_page_text(raw, &doc, source, &config.output_format, mime_type));
                 #[cfg(target_arch = "wasm32")]
                 let table_text: Option<String> = None;
@@ -3879,15 +3893,34 @@ fn build_image_ocr_document(document: Option<InternalDocument>, transcript: &str
         return build_image_internal_document(Some(transcript), None);
     };
     doc.source_format = "image".into();
-    if !doc.elements.iter().any(|element| {
-        matches!(
-            element.kind,
-            crate::types::internal::ElementKind::Image { image_index: 0 }
-        )
-    }) {
+    if doc.images.is_empty() {
         doc.elements.extend(build_image_internal_document(None, None).elements);
     }
     doc
+}
+
+#[cfg(any(feature = "ocr", feature = "ocr-wasm", feature = "ocr-pipeline"))]
+fn attach_source_image(
+    doc: &mut InternalDocument,
+    mut source: crate::types::ExtractedImage,
+    config: &ExtractionConfig,
+) -> Result<()> {
+    let source_index =
+        u32::try_from(doc.images.len()).map_err(|_| crate::XbergError::validation("Too many standalone images"))?;
+    if source_index > 0 && config.images.as_ref().is_some_and(|images| !images.inject_placeholders) {
+        doc.elements.retain(|element| {
+            !matches!(element.kind,
+            crate::types::internal::ElementKind::Image { image_index } if image_index < source_index)
+        });
+    }
+    if config.wants_own_bytes_in_result() {
+        source.image_index = source_index;
+        if source_index > 0 {
+            doc.image_ocr_skip_indices.insert(source_index);
+        }
+        doc.images.push(source);
+    }
+    Ok(())
 }
 
 /// Build image paragraphs and the source-image reference, optionally with its bytes.
@@ -4165,9 +4198,7 @@ impl InternalDocumentExtractor for ImageExtractor {
                 Self::mark_ocr_extraction(&mut doc);
                 doc.metadata.format = Some(crate::types::FormatMetadata::Image(image_metadata));
                 doc.mime_type = mime_type.to_string();
-                if config.wants_own_bytes_in_result() {
-                    doc.images.push(extracted_image);
-                }
+                attach_source_image(&mut doc, extracted_image, config)?;
                 if let Some(warning) = exif_warning.clone() {
                     doc.processing_warnings.push(warning);
                 }
@@ -4186,9 +4217,7 @@ impl InternalDocumentExtractor for ImageExtractor {
                 Self::mark_ocr_extraction(&mut doc);
                 doc.metadata.format = Some(crate::types::FormatMetadata::Image(image_metadata));
                 doc.mime_type = mime_type.to_string();
-                if config.wants_own_bytes_in_result() {
-                    doc.images.push(extracted_image);
-                }
+                attach_source_image(&mut doc, extracted_image, config)?;
                 if let Some(warning) = exif_warning.clone() {
                     doc.processing_warnings.push(warning);
                 }

@@ -85,7 +85,10 @@ fn image_ocr_positions(doc: &InternalDocument) -> Vec<usize> {
     doc.images
         .iter()
         .enumerate()
-        .filter_map(|(position, image)| (!should_skip_pdf_image_ocr(doc, image)).then_some(position))
+        .filter_map(|(position, image)| {
+            (!doc.image_ocr_skip_indices.contains(&image.image_index) && !should_skip_pdf_image_ocr(doc, image))
+                .then_some(position)
+        })
         .collect()
 }
 

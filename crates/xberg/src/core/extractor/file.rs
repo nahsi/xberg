@@ -980,6 +980,20 @@ mod cache_key_tests {
     use crate::core::config::ExtractionConfig;
 
     #[test]
+    fn vlm_figures_cache_hash_separates_intent() {
+        let base = ExtractionConfig {
+            ocr: Some(crate::core::config::OcrConfig::default()),
+            ..Default::default()
+        };
+        let mut enabled = base.clone();
+        enabled.ocr.as_mut().unwrap().backend_options = Some(serde_json::json!({"vlm_figures": true}));
+        assert_ne!(
+            hash_extraction_config(&base, "application/pdf"),
+            hash_extraction_config(&enabled, "application/pdf"),
+        );
+    }
+
+    #[test]
     fn should_default_builtin_extraction_method_to_native() {
         let mut document = crate::types::internal::InternalDocument::new("text");
 

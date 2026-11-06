@@ -1195,21 +1195,23 @@ pub(super) fn build_mixed_ocr_page_document(
     let geometry_points_per_pixel = mixed_route_geometry_points_per_pixel(page_height_pt, image_height_px);
     let (mut assembled, paragraphs, outcome) = assemble_mixed_ocr_page_document(
         doc,
-        result.document.is_some(),
+        crate::extraction::derive::preserves_ocr_reading_order(result),
         page_number,
         page_height_rounded_pt,
         geometry_points_per_pixel,
         margins,
     );
     if outcome.removed {
-        result.content = if result.document.is_some() {
+        result.content = if crate::extraction::derive::preserves_ocr_reading_order(result) {
             crate::rendering::render_plain(&assembled)
         } else {
             ocr_paragraphs_plain_text(&paragraphs)
         };
     }
     if (outcome.missing_geometry
-        || (result.document.is_none() && paragraphs.is_empty() && !result.content.trim().is_empty()))
+        || (!crate::extraction::derive::preserves_ocr_reading_order(result)
+            && paragraphs.is_empty()
+            && !result.content.trim().is_empty()))
         && (margins.top != 0.0 || margins.bottom != 0.0)
     {
         assembled
@@ -1627,7 +1629,13 @@ pub(crate) fn merge_structured_ocr_pages_into_internal_document(
 ) {
     let replacements: std::collections::BTreeMap<u32, &str> = ocr_results
         .iter()
-        .filter_map(|(&page, text)| (!text.trim().is_empty()).then_some((page, text.as_str())))
+        .filter_map(|(&page, text)| {
+            (!text.trim().is_empty()
+                || structured_pages
+                    .get(&page)
+                    .is_some_and(crate::extraction::derive::has_referenced_ocr_images))
+            .then_some((page, text.as_str()))
+        })
         .collect();
     if replacements.is_empty() {
         return;
@@ -1655,6 +1663,7 @@ pub(crate) fn merge_structured_ocr_pages_into_internal_document(
     doc.elements = rebuilt;
     doc.tables.extend(assets.tables);
     doc.images.extend(assets.images);
+    doc.image_ocr_skip_indices.extend(assets.image_ocr_skip_indices);
     if !assets.ocr_elements.is_empty() {
         doc.prebuilt_ocr_elements
             .get_or_insert_with(Vec::new)
@@ -1692,6 +1701,7 @@ pub(super) struct MergedOcrAssets {
     pub(super) image_base: u32,
     pub(super) tables: Vec<crate::types::Table>,
     pub(super) images: Vec<crate::types::ExtractedImage>,
+    image_ocr_skip_indices: ahash::AHashSet<u32>,
     pub(super) ocr_elements: Vec<crate::types::OcrElement>,
     relationships: Vec<crate::types::internal::Relationship>,
 }
@@ -1703,6 +1713,7 @@ impl MergedOcrAssets {
             image_base,
             tables: Vec::new(),
             images: Vec::new(),
+            image_ocr_skip_indices: ahash::AHashSet::new(),
             ocr_elements: Vec::new(),
             relationships: Vec::new(),
         }
@@ -1874,6 +1885,9 @@ pub(super) fn reindex_structured_ocr_page(
         let mut image = image.clone();
         image.page_number = Some(page);
         image.image_index = image_base + local_index as u32;
+        if page_doc.image_ocr_skip_indices.contains(&(local_index as u32)) {
+            assets.image_ocr_skip_indices.insert(image.image_index);
+        }
         assets.images.push(image);
     }
     if let Some(page_ocr_elements) = page_doc.prebuilt_ocr_elements.as_ref() {

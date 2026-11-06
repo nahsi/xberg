@@ -20,7 +20,7 @@ pub(super) fn supports(config: &crate::core::config::ExtractionConfig, page_coun
 
 #[cfg(all(feature = "ocr", feature = "tokio-runtime", not(target_arch = "wasm32")))]
 pub(super) fn stock_mixed_read(read: &ExtractedDocument) -> bool {
-    read.document.is_none()
+    !crate::extraction::derive::preserves_ocr_reading_order(read)
         && read.raw_ocr_source_frame.is_none()
         && read.formulas.is_empty()
         && read.form_fields.is_empty()

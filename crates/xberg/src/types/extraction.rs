@@ -485,6 +485,10 @@ pub struct ExtractedDocument {
     #[serde(skip)]
     #[allow(dead_code)]
     #[cfg_attr(alef, alef(skip))]
+    pub(crate) ocr_ordered_contribution: bool,
+    #[serde(skip)]
+    #[allow(dead_code)]
+    #[cfg_attr(alef, alef(skip))]
     pub(crate) raw_ocr_source_frame: Option<super::formats::RawOcrSourceFrame>,
 
     /// The original `InternalDocument` from the extractor, preserved before derivation.

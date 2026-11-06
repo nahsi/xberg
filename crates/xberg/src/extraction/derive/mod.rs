@@ -26,10 +26,16 @@ mod pages;
 pub(crate) mod surfaces;
 use formulas::derive_formulas;
 pub(crate) use formulas::strip_math_delimiters;
-#[cfg(any(feature = "ocr", feature = "ocr-pipeline"))]
+#[cfg(all(test, feature = "pdf", any(feature = "ocr", feature = "ocr-pipeline")))]
 pub(crate) use ocr_document::adopt_public_ocr_document;
 #[cfg(all(feature = "pdf", any(feature = "ocr", feature = "ocr-pipeline")))]
+pub(crate) use ocr_document::has_referenced_ocr_images;
+#[cfg(all(feature = "pdf", any(feature = "ocr", feature = "ocr-pipeline")))]
 pub(crate) use ocr_document::is_invalid_public_ocr_document;
+#[cfg(any(feature = "ocr", feature = "ocr-pipeline"))]
+pub(crate) use ocr_document::prepare_ocr_document;
+#[cfg(any(feature = "ocr", all(feature = "pdf", feature = "ocr-pipeline")))]
+pub(crate) use ocr_document::preserves_ocr_reading_order;
 #[cfg(test)]
 use pages::build_pages;
 pub(crate) use pages::reconcile_page_boundaries;

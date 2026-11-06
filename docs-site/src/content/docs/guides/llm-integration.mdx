@@ -108,6 +108,49 @@ config = ExtractionConfig(
 )
 ```
 
+### Figure crops
+
+Set `ocr.backend_options.vlm_figures = true` to return PNG crops of figures in the VLM's
+reading order. This supports whole-document forced PDF OCR and standalone JPEG/PNG images
+with `backend = "vlm"`:
+
+```toml title="xberg.toml"
+force_ocr = true
+output_format = "markdown"
+
+[images]
+extract_images = true
+inject_placeholders = true
+
+[ocr]
+backend = "vlm"
+backend_options = { vlm_figures = true }
+
+[ocr.vlm_config]
+model = "openai/gpt-4o-mini"
+```
+
+Xberg appends the figure instructions to the rendered default or custom `vlm_prompt`.
+The VLM marks photographs, illustrations, charts, maps and diagrams in the same response
+as the transcription. Captions remain ordinary text; a short model description supplies
+the image alt text, or `Figure` when no description is given. Crop accuracy depends on the model.
+
+The returned image inventory includes the crops and any requested native images or page
+rasters. Only crops appear as figure links on pages where the VLM marked figures.
+Standalone source bytes remain in the inventory without an extra source-image link.
+PDF crops carry PDF-point bounding boxes; standalone crops leave that field unset.
+
+`images.extract_images = false` disables figure requests. `inject_placeholders = false`
+returns crops without image links. `max_images_per_page`, `max_image_dimension` and
+`security_limits` bound crop processing. Invalid boxes or rejected crops produce a warning
+without discarding surrounding text or successful crops. Malformed or incomplete markers
+remain literal text.
+
+Figure crops do not run on mixed native/OCR PDFs, `force_ocr_pages`, automatic OCR routing,
+embedded-image OCR or standalone multistage OCR. Combining `vlm_figures` with `vlm_fallback`
+or an explicit OCR pipeline is a validation error. Without an active figure policy, prompts
+and provider transcripts remain unchanged, including literal figure markers.
+
 ### Supported Providers
 
 Any liter-llm vision-capable provider works as a VLM OCR backend:

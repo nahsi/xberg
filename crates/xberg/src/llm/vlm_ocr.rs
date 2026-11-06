@@ -89,22 +89,45 @@ impl OcrBackend for VlmOcrBackend {
         let languages = config.effective_languages();
         let lang_str = languages[0].as_str();
 
-        let (text, usage) = vlm_ocr(image_bytes, mime, lang_str, vlm_config, config.vlm_prompt.as_deref()).await?;
-
-        let formulas = extract_formulas(&text);
-        let tables = extract_gfm_tables(&text);
-        let metadata = build_metadata(image_bytes, tables.len() as u32);
-
-        Ok(crate::ExtractedDocument {
-            content: text,
-            mime_type: Cow::Borrowed("text/plain"),
-            llm_usage: usage.map(|u| vec![u]),
-            formulas,
-            metadata,
-            tables,
-            detected_languages: Some(languages),
-            ..Default::default()
-        })
+        let policy = config
+            .backend_options
+            .as_ref()
+            .and_then(|options| options.get(crate::core::config::ocr::VLM_FIGURE_POLICY_BACKEND_OPTION))
+            .cloned()
+            .map(serde_json::from_value::<crate::core::config::ocr::VlmFigurePolicy>)
+            .transpose()
+            .map_err(|error| crate::XbergError::validation(format!("Invalid VLM figure policy: {error}")))?;
+        let (text, usage) = vlm_ocr(
+            image_bytes,
+            mime,
+            lang_str,
+            vlm_config,
+            config.vlm_prompt.as_deref(),
+            policy.is_some(),
+        )
+        .await?;
+        let mut result = match policy {
+            Some(policy) => {
+                super::vlm_figures::materialize(
+                    text,
+                    image_bytes,
+                    policy,
+                    config.security_limits.clone().unwrap_or_default(),
+                )
+                .await?
+            }
+            None => crate::ExtractedDocument {
+                content: text,
+                ..Default::default()
+            },
+        };
+        result.formulas = extract_formulas(&result.content);
+        result.tables = extract_gfm_tables(&result.content);
+        result.metadata = build_metadata(image_bytes, result.tables.len() as u32);
+        result.mime_type = Cow::Borrowed("text/plain");
+        result.llm_usage = usage.map(|usage| vec![usage]);
+        result.detected_languages = Some(languages);
+        Ok(result)
     }
 
     fn supports_language(&self, _lang: &str) -> bool {
@@ -179,6 +202,7 @@ pub(crate) async fn vlm_ocr(
     language: &str,
     config: &LlmConfig,
     vlm_prompt: Option<&str>,
+    figures: bool,
 ) -> crate::Result<(String, Option<crate::types::LlmUsage>)> {
     // liter-llm applies its own 60s default when no timeout is set, which is too
     // short for full-page VLM transcription. Supply a VLM-appropriate default when
@@ -191,7 +215,10 @@ pub(crate) async fn vlm_ocr(
 
     let template = vlm_prompt.unwrap_or(super::prompts::VLM_OCR_TEMPLATE);
     let ctx = minijinja::context! { language => language };
-    let prompt = super::prompts::render_template(template, &ctx)?;
+    let mut prompt = super::prompts::render_template(template, &ctx)?;
+    if figures {
+        prompt.push_str(super::vlm_figures::PROMPT_CLAUSE);
+    }
 
     let message = Message::User(UserMessage {
         content: UserContent::Parts(vec![

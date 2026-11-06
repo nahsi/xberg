@@ -63,6 +63,55 @@ pub(crate) fn adopt_public_ocr_document(result: &mut ExtractedDocument, limits: 
     Ok(())
 }
 
+#[cfg(any(feature = "ocr", feature = "pdf"))]
+pub(crate) fn preserves_ocr_reading_order(result: &ExtractedDocument) -> bool {
+    result.document.is_some() || result.ocr_ordered_contribution
+}
+
+pub(crate) fn prepare_ocr_document(result: &mut ExtractedDocument, limits: &SecurityLimits) -> crate::Result<()> {
+    adopt_public_ocr_document(result, limits)?;
+    if result.ocr_ordered_contribution {
+        let doc = result
+            .ocr_internal_document
+            .as_mut()
+            .ok_or_else(|| invalid_document("missing ordered contribution"))?;
+        let images = result.images.take().unwrap_or_default();
+        if !doc.images.is_empty()
+            || images.is_empty()
+            || !doc
+                .elements
+                .iter()
+                .any(|element| matches!(element.kind, ElementKind::Image { .. }))
+        {
+            return Err(invalid_document("invalid ordered image inventory"));
+        }
+        for element in &doc.elements {
+            if let ElementKind::Image { image_index } = element.kind
+                && !images
+                    .get(image_index as usize)
+                    .is_some_and(|image| image.image_index == image_index && !image.data.is_empty())
+            {
+                return Err(invalid_document("invalid ordered image reference"));
+            }
+        }
+        doc.images = images;
+    }
+    Ok(())
+}
+
+#[cfg(feature = "pdf")]
+pub(crate) fn has_referenced_ocr_images(doc: &InternalDocument) -> bool {
+    doc.elements.iter().any(|element| {
+        if let ElementKind::Image { image_index } = element.kind {
+            doc.images
+                .get(image_index as usize)
+                .is_some_and(|image| !image.data.is_empty())
+        } else {
+            false
+        }
+    })
+}
+
 fn validate_metadata(
     result: &ExtractedDocument,
     structure: &DocumentStructure,
