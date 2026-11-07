@@ -260,3 +260,34 @@ fn test_extract_images_with_data_skips_decode_for_ocr_only_full_page_image() {
     assert_eq!((bbox.x0, bbox.y0), (0.0, 0.0));
     assert_eq!((bbox.x1, bbox.y1), (PAGE_WIDTH as f64, PAGE_HEIGHT as f64));
 }
+
+#[test]
+fn excluded_vlm_pages_never_enter_image_decoding() {
+    let pdf = build_full_page_image_with_text_pdf();
+    let mut doc = crate::pdf::native::NativeDocument::open_bytes(&pdf).unwrap();
+    let pool = rayon::ThreadPoolBuilder::new()
+        .num_threads(1)
+        .thread_name(|_| "xberg-vlm-excluded-image".to_owned())
+        .build()
+        .unwrap();
+    let (images, warnings) = pool
+        .install(|| {
+            extract_images_with_data_excluding_pages(
+                &mut doc,
+                None,
+                None,
+                &std::collections::HashMap::new(),
+                &ahash::AHashSet::from_iter([1]),
+            )
+        })
+        .unwrap();
+    assert!(images.is_empty());
+    assert!(warnings.is_empty());
+    assert!(
+        !page_call_thread_names()
+            .lock()
+            .unwrap()
+            .contains("xberg-vlm-excluded-image"),
+        "excluded pages must not reach the per-page decoder"
+    );
+}

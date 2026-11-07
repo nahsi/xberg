@@ -600,6 +600,22 @@ pub(crate) fn extract_images_with_data(
     cancel_token: Option<&CancellationToken>,
     ocr_skip_candidate_pages: &std::collections::HashMap<u32, (f64, f64)>,
 ) -> Result<(Vec<crate::types::ExtractedImage>, Vec<crate::types::ProcessingWarning>)> {
+    extract_images_with_data_excluding_pages(
+        doc,
+        max_images_per_page,
+        cancel_token,
+        ocr_skip_candidate_pages,
+        &ahash::AHashSet::new(),
+    )
+}
+
+pub(crate) fn extract_images_with_data_excluding_pages(
+    doc: &mut NativeDocument,
+    max_images_per_page: Option<u32>,
+    cancel_token: Option<&CancellationToken>,
+    ocr_skip_candidate_pages: &std::collections::HashMap<u32, (f64, f64)>,
+    excluded_pages: &ahash::AHashSet<u32>,
+) -> Result<(Vec<crate::types::ExtractedImage>, Vec<crate::types::ProcessingWarning>)> {
     if max_images_per_page == Some(0) {
         return Ok((Vec::new(), Vec::new()));
     }
@@ -628,6 +644,7 @@ pub(crate) fn extract_images_with_data(
         &alt_text_by_page,
         cancel_token,
         ocr_skip_candidate_pages,
+        excluded_pages,
     );
 
     // The document-global `image_index` and the skipped-image warnings are assigned here,
@@ -683,6 +700,7 @@ fn extract_all_page_images(
     alt_text_by_page: &std::collections::HashMap<u32, Vec<Option<String>>>,
     cancel_token: Option<&CancellationToken>,
     ocr_skip_candidate_pages: &std::collections::HashMap<u32, (f64, f64)>,
+    excluded_pages: &ahash::AHashSet<u32>,
 ) -> Vec<Vec<PageImageOutcome>> {
     // rayon's work-stealing pool needs OS threads; wasm32 has none, so it falls back to a
     // sequential iterator there, matching the gate on the paragraph pass in
@@ -693,6 +711,9 @@ fn extract_all_page_images(
         (0..page_count)
             .into_par_iter()
             .map(|page_idx| {
+                if excluded_pages.contains(&((page_idx + 1) as u32)) {
+                    return Vec::new();
+                }
                 extract_page_images(
                     doc,
                     page_idx,
@@ -708,6 +729,9 @@ fn extract_all_page_images(
     {
         (0..page_count)
             .map(|page_idx| {
+                if excluded_pages.contains(&((page_idx + 1) as u32)) {
+                    return Vec::new();
+                }
                 extract_page_images(
                     doc,
                     page_idx,

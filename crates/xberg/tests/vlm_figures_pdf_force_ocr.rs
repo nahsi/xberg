@@ -52,37 +52,54 @@ fn request_image(request: &Request) -> image::RgbImage {
     image::load_from_memory(&bytes).unwrap().to_rgb8()
 }
 
+#[derive(Clone, Copy)]
+enum PageResponse {
+    Figures,
+    Text(&'static str),
+    NativeRecovery { fail_page: bool },
+}
+
 async fn extract_case(
     rotation: i64,
     figure_only: bool,
     figures: bool,
 ) -> (xberg::types::ExtractedDocument, image::RgbImage) {
-    extract_transcript_case(rotation, figure_only, figures, None).await
+    extract_transcript_case(rotation, figure_only, figures, PageResponse::Figures).await
 }
 
 async fn extract_transcript_case(
     rotation: i64,
     figure_only: bool,
     figures: bool,
-    transcript: Option<&'static str>,
+    response: PageResponse,
 ) -> (xberg::types::ExtractedDocument, image::RgbImage) {
     let server = MockServer::start().await;
-    let expected_calls = if cfg!(feature = "ocr") && figure_only && figures {
-        3
+    let expected_calls = if matches!(response, PageResponse::NativeRecovery { .. }) {
+        6
     } else {
         2
     };
     Mock::given(method("POST"))
         .and(path("/chat/completions"))
         .respond_with(move |request: &Request| {
+            let body: Value = request.body_json().unwrap();
+            let page_read = body["messages"][0]["content"][0]["text"]
+                .as_str()
+                .unwrap()
+                .contains("<figure bbox=");
+            if page_read && matches!(response, PageResponse::NativeRecovery { fail_page: true }) {
+                return ResponseTemplate::new(500);
+            }
             let image = request_image(request);
             let first = (f64::from(image.width()) / f64::from(image.height()) - 0.5).abs() < 0.01;
-            let transcript = match transcript {
-                Some(text) => text,
-                None if first => "The first page contains ordinary transcribed text.",
-                None if !figures => "The second page contains ordinary transcribed text.",
-                None if figure_only => "<figure bbox=\"100,200,600,800\" description=\"Photo\"/>",
-                None => concat!(
+            let transcript = match response {
+                PageResponse::Text(text) => text,
+                PageResponse::NativeRecovery { .. } if page_read => "",
+                PageResponse::NativeRecovery { .. } => "Recovered text from the native scan.",
+                PageResponse::Figures if first => "The first page contains ordinary transcribed text.",
+                PageResponse::Figures if !figures => "The second page contains ordinary transcribed text.",
+                PageResponse::Figures if figure_only => "<figure bbox=\"100,200,600,800\" description=\"Photo\"/>",
+                PageResponse::Figures => concat!(
                     "Before the photograph.\n",
                     "<figure bbox=\"100,200,600,800\" description=\"Photo\"/>\n",
                     "Caption after the photograph.",
@@ -155,6 +172,7 @@ fn assert_figure(result: &xberg::types::ExtractedDocument, sent: &image::RgbImag
         .find(|image| image.description.as_deref() == Some("Photo"))
         .expect("crop survives native inventory attachment");
     assert_eq!(crop.page_number, Some(2));
+    assert_eq!(images.len(), 1, "VLM-read pages return only their cropped figure");
     assert_eq!(images[crop.image_index as usize].data, crop.data);
     let left = sent.width() / 10;
     let top = sent.height() / 5;
@@ -195,12 +213,10 @@ fn assert_figure(result: &xberg::types::ExtractedDocument, sent: &image::RgbImag
         refs.iter().all(|(page, _)| *page != Some(1)),
         "a VLM-read page without figures has no native or page-raster link"
     );
-    assert_eq!(
+    assert!(
         images
             .iter()
-            .filter(|image| image.image_kind == Some(xberg::types::ImageKind::PageRaster))
-            .count(),
-        2
+            .all(|image| image.image_kind != Some(xberg::types::ImageKind::PageRaster))
     );
     assert!(
         result
@@ -223,15 +239,13 @@ async fn forced_pdf_keeps_order_assets_and_per_page_placeholders() {
 async fn forced_pdf_retains_a_figure_only_page() {
     let (result, sent) = extract_case(0, true, true).await;
     assert_figure(&result, &sent, 0);
-    #[cfg(feature = "ocr")]
     assert!(
-        result.images.as_ref().unwrap().iter().any(|image| {
-            image.page_number == Some(2)
-                && image.description.is_none()
-                && image.image_kind != Some(xberg::types::ImageKind::PageRaster)
-                && image.ocr_result.is_some()
-        }),
-        "native-image OCR remains enabled on the textless page"
+        result
+            .images
+            .as_ref()
+            .unwrap()
+            .iter()
+            .all(|image| image.description.as_deref() == Some("Photo"))
     );
 }
 
@@ -276,8 +290,29 @@ async fn forced_pdf_without_figures_keeps_native_links() {
 #[tokio::test]
 async fn marker_free_figure_mode_keeps_crlf_list_markdown() {
     const TRANSCRIPT: &str = "A list of supplies:\r\n\r\n- First item\r\n- Second item\r\n\r\nA final paragraph.";
-    let (plain, _) = extract_transcript_case(0, false, false, Some(TRANSCRIPT)).await;
-    let (figures, _) = extract_transcript_case(0, false, true, Some(TRANSCRIPT)).await;
+    let (plain, _) = extract_transcript_case(0, false, false, PageResponse::Text(TRANSCRIPT)).await;
+    let (figures, _) = extract_transcript_case(0, false, true, PageResponse::Text(TRANSCRIPT)).await;
     let plain_text = plain.content.split("![").next().unwrap().trim();
     assert_eq!(figures.content.trim(), plain_text);
+    assert!(
+        figures.images.as_ref().is_none_or(Vec::is_empty),
+        "marker-free VLM pages retain no scans"
+    );
+}
+
+#[tokio::test]
+async fn fallback_and_failed_pages_keep_native_scans() {
+    for fail_page in [false, true] {
+        let (result, _) = extract_transcript_case(0, false, true, PageResponse::NativeRecovery { fail_page }).await;
+        let images = result.images.as_ref().unwrap();
+        let native: Vec<_> = images
+            .iter()
+            .filter(|image| image.image_kind != Some(xberg::types::ImageKind::PageRaster))
+            .collect();
+        assert_eq!(native.len(), 4, "two recovered source images and two native scans");
+        assert!(native.iter().all(|image| !image.data.is_empty()));
+        assert!(native.iter().any(|image| image.page_number == Some(1)));
+        assert!(native.iter().any(|image| image.page_number == Some(2)));
+        assert!(result.content.contains("Recovered text from the native scan."));
+    }
 }

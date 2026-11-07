@@ -329,6 +329,47 @@ where
     work()
 }
 
+#[cfg(any(feature = "ocr", feature = "ocr-pipeline"))]
+async fn ocr_inline_images(
+    extracted_images: &mut Option<Vec<crate::types::ExtractedImage>>,
+    config: &ExtractionConfig,
+) -> Result<()> {
+    if config.pdf_options.as_ref().is_some_and(|p| p.ocr_inline_images)
+        && let Some(imgs) = extracted_images.as_mut()
+        && !imgs.is_empty()
+    {
+        let resolved_ocr_config = ocr::resolve_ocr_config(config);
+        let ocr_config = resolved_ocr_config.as_ref();
+        crate::plugins::ensure_ocr_backends_initialized();
+        let backend = {
+            let registry = crate::plugins::registry::get_ocr_backend_registry();
+            registry.read().get(&ocr_config.backend)?
+        };
+        let mut ocr_config_with_format = ocr_config.clone();
+        ocr_config_with_format.output_format = Some(config.output_format.clone());
+        // GH#1651: preserve a backend's limits when the extraction config does not override them. ~keep
+        if let Some(limits) = config.security_limits.clone() {
+            ocr_config_with_format.security_limits = Some(limits);
+        }
+        for img in imgs.iter_mut() {
+            if config.cancel_token.as_ref().is_some_and(|t| t.is_cancelled()) {
+                break;
+            }
+            match backend.process_image(&img.data, &ocr_config_with_format).await {
+                Ok(mut ocr_result) => {
+                    ocr_config.apply_public_element_policy(&mut ocr_result);
+                    img.ocr_result = Some(Box::new(ocr_result));
+                }
+                Err(e) => tracing::warn!(
+                    page = img.page_number, image_index = img.image_index, error = %e,
+                    "inline image OCR failed; image returned without OCR result"
+                ),
+            }
+        }
+    }
+    Ok(())
+}
+
 #[cfg(feature = "pdf")]
 fn extract_native_blocking(
     content: Vec<u8>,
@@ -2830,45 +2871,7 @@ impl PdfExtractor {
         ) = native_output.extraction;
 
         #[cfg(any(feature = "ocr", feature = "ocr-pipeline"))]
-        if config.pdf_options.as_ref().is_some_and(|p| p.ocr_inline_images)
-            && let Some(ref mut imgs) = extracted_images
-            && !imgs.is_empty()
-        {
-            let resolved_ocr_config = ocr::resolve_ocr_config(config);
-            let ocr_config = resolved_ocr_config.as_ref();
-            crate::plugins::ensure_ocr_backends_initialized();
-            let backend = {
-                let registry = crate::plugins::registry::get_ocr_backend_registry();
-                registry.read().get(&ocr_config.backend)?
-            };
-            let mut ocr_config_with_format = ocr_config.clone();
-            ocr_config_with_format.output_format = Some(config.output_format.clone());
-            // GH#1651: this embedded-image route never carried the caller's decode limits,
-            // so every decode ran under `SecurityLimits::default()`. Conditional so a limit
-            // set directly on `OcrConfig` is not replaced by `None`. ~keep
-            if let Some(limits) = config.security_limits.clone() {
-                ocr_config_with_format.security_limits = Some(limits);
-            }
-            for img in imgs.iter_mut() {
-                if config.cancel_token.as_ref().is_some_and(|t| t.is_cancelled()) {
-                    break;
-                }
-                match backend.process_image(&img.data, &ocr_config_with_format).await {
-                    Ok(mut ocr_result) => {
-                        ocr_config.apply_public_element_policy(&mut ocr_result);
-                        img.ocr_result = Some(Box::new(ocr_result));
-                    }
-                    Err(e) => {
-                        tracing::warn!(
-                            page = img.page_number,
-                            image_index = img.image_index,
-                            error = %e,
-                            "inline image OCR failed; image returned without OCR result"
-                        );
-                    }
-                }
-            }
-        }
+        ocr_inline_images(&mut extracted_images, config).await?;
 
         #[cfg(any(feature = "ocr", feature = "ocr-pipeline"))]
         let mut ocr_tables: Vec<crate::types::Table> = Vec::new();
@@ -2990,6 +2993,41 @@ impl PdfExtractor {
                 markdown_layout_acceleration_override.take(),
             )
             .await?;
+            #[cfg(feature = "liter-llm")]
+            if extraction::defer_vlm_native_images(config) {
+                ensure_pdf_not_cancelled(config)?;
+                let excluded_pages = ocr_doc
+                    .as_ref()
+                    .map(|doc| doc.vlm_figure_pages.clone())
+                    .unwrap_or_default();
+                let source = content.to_vec();
+                let image_config = config.clone();
+                let (images, warnings) = spawn_pdf_blocking(move || {
+                    let passwords = image_config
+                        .pdf_options
+                        .as_ref()
+                        .and_then(|options| options.passwords.as_deref())
+                        .unwrap_or(&[]);
+                    let mut doc = crate::pdf::native::NativeDocument::open_bytes_with_passwords(&source, passwords)?;
+                    let result = crate::pdf::native::images::extract_images_with_data_excluding_pages(
+                        &mut doc,
+                        image_config
+                            .images
+                            .as_ref()
+                            .and_then(|images| images.max_images_per_page),
+                        image_config.cancel_token.as_ref(),
+                        &std::collections::HashMap::new(),
+                        &excluded_pages,
+                    )
+                    .map_err(|error| crate::XbergError::parsing(format!("PDF image extraction failed: {error}")))?;
+                    ensure_pdf_not_cancelled(&image_config)?;
+                    Ok(result)
+                })
+                .await?;
+                extracted_images = Some(images);
+                pdf_extraction_warnings.extend(warnings);
+                ocr_inline_images(&mut extracted_images, config).await?;
+            }
             if let Some(warning) = layout_warning {
                 crate::core::diagnostics::push_warning_deduped(&mut ocr_fallback_warnings, warning);
             }

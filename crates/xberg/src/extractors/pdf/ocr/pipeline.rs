@@ -4633,6 +4633,7 @@ pub(super) async fn extract_with_ocr_for_page(
             // Set when the embedded-image retry ran (attempted at least one image) but the
             // backend returned successfully with empty content on every one of them (#1673).
             let mut xobject_retry_ran_empty = false;
+            let mut recovered_rasters = Vec::new();
             let figure_only_page = ocr_result.content.trim().is_empty()
                 && ordered_ocr_pages
                     .get(&document_page_number)
@@ -4706,7 +4707,7 @@ pub(super) async fn extract_with_ocr_for_page(
                         preprocessing_by_page.insert(document_page_number, metadata);
                     }
                     if capture_rasters {
-                        captured_rasters.extend(images);
+                        recovered_rasters = images;
                     }
                     image_fallback_warnings.push(xobject_fallback_warning(
                         document_page_idx,
@@ -4983,11 +4984,6 @@ pub(super) async fn extract_with_ocr_for_page(
                     pages_text_claimed_by_tables[page_idx] = ocr_doc.ocr_text_claimed_by_tables;
                 }
 
-                if capture_rasters {
-                    let (_, png_arc, w, h) = &encoded_batch[offset];
-                    let png_bytes = bytes::Bytes::copy_from_slice(png_arc.as_ref());
-                    captured_rasters.push(build_page_raster_image(document_page_idx, png_bytes, *w, *h));
-                }
                 let dict_invalid_word_ratio = ocr_result
                     .metadata
                     .additional
@@ -5027,6 +5023,12 @@ pub(super) async fn extract_with_ocr_for_page(
                 );
                 page_texts[page_idx] = acceptance.content;
                 rejected_pages[page_idx] = acceptance.discarded;
+                if capture_rasters && (acceptance.discarded || !vlm_figure_pages.contains(&document_page_number)) {
+                    captured_rasters.append(&mut recovered_rasters);
+                    let (_, png_arc, w, h) = &encoded_batch[offset];
+                    let png_bytes = bytes::Bytes::copy_from_slice(png_arc.as_ref());
+                    captured_rasters.push(build_page_raster_image(document_page_idx, png_bytes, *w, *h));
+                }
                 if let Some(verdict) = acceptance.verdict {
                     recognition_noise_verdicts.push(verdict);
                 }
@@ -5078,11 +5080,6 @@ pub(super) async fn extract_with_ocr_for_page(
             }
 
             let _ = page_idx;
-            if capture_rasters {
-                let (_, png_arc, w, h) = &encoded_batch[offset];
-                let png_bytes = bytes::Bytes::copy_from_slice(png_arc.as_ref());
-                captured_rasters.push(build_page_raster_image(document_page_idx, png_bytes, *w, *h));
-            }
             let dict_invalid_word_ratio = ocr_result
                 .metadata
                 .additional
@@ -5122,6 +5119,12 @@ pub(super) async fn extract_with_ocr_for_page(
             );
             page_texts[page_idx] = acceptance.content;
             rejected_pages[page_idx] = acceptance.discarded;
+            if capture_rasters && (acceptance.discarded || !vlm_figure_pages.contains(&document_page_number)) {
+                captured_rasters.append(&mut recovered_rasters);
+                let (_, png_arc, w, h) = &encoded_batch[offset];
+                let png_bytes = bytes::Bytes::copy_from_slice(png_arc.as_ref());
+                captured_rasters.push(build_page_raster_image(document_page_idx, png_bytes, *w, *h));
+            }
             if let Some(verdict) = acceptance.verdict {
                 recognition_noise_verdicts.push(verdict);
             }
