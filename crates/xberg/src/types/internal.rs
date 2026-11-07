@@ -391,7 +391,7 @@ pub struct InternalDocument {
     #[serde(skip)]
     pub image_ocr_skip_indices: ahash::AHashSet<u32>,
 
-    /// Forced-OCR PDF pages the VLM figure read owns: native pictures there get no placeholder link. ~keep
+    /// Forced-OCR PDF pages the VLM figure read owns: only cropped figures are retained. ~keep
     #[serde(skip)]
     pub vlm_figure_pages: ahash::AHashSet<u32>,
 }

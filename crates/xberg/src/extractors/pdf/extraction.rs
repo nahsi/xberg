@@ -599,6 +599,23 @@ pub(super) struct NativeLayoutInput<'a> {
     pub(super) region_text: Option<&'a crate::engine::layout_region_text::RegionTextLayout>,
 }
 
+pub(super) fn defer_vlm_native_images(config: &ExtractionConfig) -> bool {
+    #[cfg(feature = "liter-llm")]
+    {
+        config.force_ocr
+            && !config.effective_disable_ocr()
+            && config
+                .ocr
+                .as_ref()
+                .is_some_and(|ocr| crate::core::config::ocr::vlm_figures_active(ocr, config.images.as_ref()))
+    }
+    #[cfg(not(feature = "liter-llm"))]
+    {
+        let _ = config;
+        false
+    }
+}
+
 /// Extract text, metadata, tables, and annotations from a PDF document using the xberg_native_pdf backend.
 ///
 /// Accepts an authenticated `NativeDocument`, then delegates to each native extraction module.
@@ -864,43 +881,45 @@ pub(crate) fn extract_all_from_native_document(
     #[cfg(not(all(feature = "ocr", feature = "tokio-runtime")))]
     let ocr_skip_candidate_pages: std::collections::HashMap<u32, (f64, f64)> = std::collections::HashMap::new();
 
-    let (images, image_positions) = if images_extraction_enabled || ocr_inline_images {
-        let max_images = config.images.as_ref().and_then(|i| i.max_images_per_page);
-        let (extracted, image_warnings) = crate::pdf::native::images::extract_images_with_data(
-            &mut doc,
-            max_images,
-            config.cancel_token.as_ref(),
-            &ocr_skip_candidate_pages,
-        )
-        .map_err(|e| crate::error::XbergError::Parsing {
-            message: format!("xberg_native_pdf image extraction failed: {e}"),
-            source: None,
-        })?;
-        extraction_warnings.extend(image_warnings);
-        #[cfg(all(
-            feature = "pdf",
-            feature = "ocr",
-            feature = "tokio-runtime",
-            not(target_arch = "wasm32")
-        ))]
-        if crate::extraction::image_ocr::pdf_gap::eligible(config)
-            && let [image] = extracted.as_slice()
-        {
-            let limits = config
-                .security_limits
-                .as_ref()
-                .or_else(|| config.ocr.as_ref()?.security_limits.as_ref());
-            *gap = super::ocr::embedded_gap_placement(&doc.doc, image, limits.unwrap_or(&Default::default()));
-        }
+    // VLM ownership is known only after OCR; do not decode the whole book's scans before then. ~keep
+    let (images, image_positions) =
+        if (images_extraction_enabled || ocr_inline_images) && !defer_vlm_native_images(config) {
+            let max_images = config.images.as_ref().and_then(|i| i.max_images_per_page);
+            let (extracted, image_warnings) = crate::pdf::native::images::extract_images_with_data(
+                &mut doc,
+                max_images,
+                config.cancel_token.as_ref(),
+                &ocr_skip_candidate_pages,
+            )
+            .map_err(|e| crate::error::XbergError::Parsing {
+                message: format!("xberg_native_pdf image extraction failed: {e}"),
+                source: None,
+            })?;
+            extraction_warnings.extend(image_warnings);
+            #[cfg(all(
+                feature = "pdf",
+                feature = "ocr",
+                feature = "tokio-runtime",
+                not(target_arch = "wasm32")
+            ))]
+            if crate::extraction::image_ocr::pdf_gap::eligible(config)
+                && let [image] = extracted.as_slice()
+            {
+                let limits = config
+                    .security_limits
+                    .as_ref()
+                    .or_else(|| config.ocr.as_ref()?.security_limits.as_ref());
+                *gap = super::ocr::embedded_gap_placement(&doc.doc, image, limits.unwrap_or(&Default::default()));
+            }
 
-        let positions: Vec<(u32, u32)> = extracted
-            .iter()
-            .map(|img| (img.page_number.unwrap_or(1), img.image_index))
-            .collect();
-        (Some(extracted), positions)
-    } else {
-        (None, Vec::new())
-    };
+            let positions: Vec<(u32, u32)> = extracted
+                .iter()
+                .map(|img| (img.page_number.unwrap_or(1), img.image_index))
+                .collect();
+            (Some(extracted), positions)
+        } else {
+            (None, Vec::new())
+        };
 
     if config.cancel_token.as_ref().is_some_and(|t| t.is_cancelled()) {
         return Err(crate::error::XbergError::Cancelled);

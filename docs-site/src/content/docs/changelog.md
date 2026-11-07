@@ -17,6 +17,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   Opt in with `ocr.backend_options.vlm_figures = true` and `images.extract_images = true` on forced
   whole-document PDF OCR or standalone JPEG/PNG with `backend = "vlm"`. Crops are positioned PNGs with
   the model's description as alt text; `vlm_fallback` and OCR pipelines reject the option.
+  Native scans and page rasters from VLM-read PDF pages are omitted from results.
 
 - **(layout): Return source-proven text for selected native PDF layout regions in Rust.** (#2357)
   `Engine::extract_with_layout_region_text` returns region text in page reading order and omits unproved or redacted text.

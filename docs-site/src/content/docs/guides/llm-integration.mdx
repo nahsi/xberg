@@ -135,9 +135,9 @@ The VLM marks photographs, illustrations, charts, maps and diagrams in the same 
 as the transcription. Captions remain ordinary text; a short model description supplies
 the image alt text, or `Figure` when no description is given. Crop accuracy depends on the model.
 
-The returned image inventory includes the crops and any requested native images or page
-rasters. On every PDF page read in figure mode, only VLM crops appear as image links.
-Native images and page rasters stay inventory-only, including on pages without figures.
+On PDF pages owned by the VLM figure read, the returned image inventory contains only crops.
+Native images and page rasters are not collected for those pages, even with `include_page_rasters`.
+Fallback pages, failed pages and figures-off extraction keep the existing image behaviour.
 Standalone source bytes remain in the inventory without an extra source-image link.
 PDF crops carry PDF-point bounding boxes; standalone crops leave that field unset.
 
